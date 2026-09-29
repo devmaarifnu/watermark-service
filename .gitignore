@@ -1,0 +1,16 @@
+# Binary hasil build
+bin/
+*.exe
+
+# Berkas PDF dan data satpen tidak boleh masuk repo.
+# Dokumen SK bersifat internal dan data satpen memuat NPSN serta nomor registrasi.
+*.pdf
+*.csv
+
+# Berkas keluaran tool
+*_pecahan/
+*_watermark/
+
+# Go
+*.test
+*.out
