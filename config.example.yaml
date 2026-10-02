@@ -1,0 +1,56 @@
+server:
+  addr: ":8080"
+  read_timeout: 10s
+  write_timeout: 30s
+  shutdown_timeout: 30s
+
+webhook:
+  url: "https://internal.example.id/api/bhpnu/callback"
+  secret: "" # diisi lewat ENV di produksi
+  timeout: 10s
+  max_attempts: 5
+  backoff_base: 1s
+
+auth:
+  api_key: "" # diisi lewat ENV di produksi
+
+storage:
+  allowed_input_base:
+    - "/var/www/src"
+  allowed_output_base: "/var/www/out"
+  tmp_dir: "/var/tmp/wmsvc"
+  create_output_dir: true
+  overwrite: false
+
+security:
+  allow_any_path: false
+
+worker:
+  count: 2
+  queue_size: 16
+  job_timeout: 120s
+
+limits:
+  max_page_count: 500
+  max_file_size_mb: 100
+
+watermark:
+  font_size: 8
+  opacity: 0.18
+  pos: "bl"
+  rotation: 0
+  offset: "18 18"
+  border_width: 1
+  radius: 6
+  color: "0.85 0 0"
+
+merge:
+  order:
+    - piagam
+    - sk
+    - akta
+  divider_page: false
+
+log:
+  level: info
+  format: json

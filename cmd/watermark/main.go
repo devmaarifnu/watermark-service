@@ -18,20 +18,15 @@ import (
 	"encoding/csv"
 	"flag"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/font"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 
 	"pdfsplit/internal/common"
+	"pdfsplit/internal/wm"
 )
 
 const wmUsage = `watermark - tempel identitas satuan pendidikan di setiap halaman PDF
@@ -90,25 +85,6 @@ type satpen struct {
 	Sekolah    string
 	Registrasi string
 	NPSN       string
-}
-
-// Jarak tepi kotak terhadap teks, dalam point.
-const (
-	boxPadX = 7.0
-	boxPadY = 9.0
-)
-
-// wmOpts menampung pilihan tampilan watermark.
-type wmOpts struct {
-	Opacity     float64
-	FontSize    float64
-	Color       string
-	Pos         string
-	Rotation    float64
-	Offset      string
-	BorderWidth float64
-	Radius      float64 // radius sudut kotak; 0 = tanpa pembulatan
-	MaxWidth    float64 // lebar maksimum teks dalam point; 0 = tanpa batas
 }
 
 func runWM(args []string) error {
@@ -171,7 +147,6 @@ func runWM(args []string) error {
 
 	common.EnableLog(*verbose)
 
-	// Tentukan daftar satpen: satu dari opsi, atau banyak dari CSV.
 	var batch []satpen
 	switch {
 	case *csvPath != "":
@@ -189,13 +164,11 @@ func runWM(args []string) error {
 	case *sekolah != "" || *npsn != "" || *reg != "":
 		batch = []satpen{{Sekolah: *sekolah, Registrasi: *reg, NPSN: *npsn}}
 	default:
-		// Tanpa data satpen: pakai contoh supaya alur kerja bisa langsung dilihat.
 		batch = contohSatpen()
 		fmt.Fprintln(os.Stderr, "catatan: -sekolah/-reg/-npsn tidak diisi, memakai 2 satpen contoh.")
 		fmt.Fprintln(os.Stderr)
 	}
 
-	// Validasi seluruh data sebelum menyentuh file apa pun.
 	for i, s := range batch {
 		if err := validateSatpen(s); err != nil {
 			return fmt.Errorf("satpen ke-%d: %w", i+1, err)
@@ -210,7 +183,7 @@ func runWM(args []string) error {
 		return fmt.Errorf("-cover %d menghabiskan seluruh %d halaman, tidak ada yang ditempeli", *cover, total)
 	}
 
-	o := wmOpts{
+	o := wm.Options{
 		Opacity:     *opacity,
 		FontSize:    *fontSize,
 		Color:       *colStr,
@@ -219,10 +192,8 @@ func runWM(args []string) error {
 		Offset:      *offset,
 		BorderWidth: *border,
 		Radius:      *radius,
-		MaxWidth:    maxTextWidth(*inFile),
 	}
 
-	// Halaman yang ditempeli: semua kecuali -cover halaman awal.
 	var pages []string
 	if *cover > 0 {
 		pages = []string{fmt.Sprintf("%d-%d", *cover+1, total)}
@@ -230,7 +201,6 @@ func runWM(args []string) error {
 
 	base := strings.TrimSuffix(filepath.Base(*inFile), filepath.Ext(*inFile))
 
-	// Mode batch tanpa -outdir: buat folder di samping file sumber.
 	targetDir := *outDir
 	if targetDir == "" && *csvPath != "" {
 		targetDir = filepath.Join(filepath.Dir(*inFile), base+"_watermark")
@@ -256,263 +226,29 @@ func runWM(args []string) error {
 		}
 	}
 
-	// Satu satpen: tulis ke -out atau nama turunan di samping file sumber.
 	if len(batch) == 1 && targetDir == "" {
 		out := *outFile
 		if out == "" {
 			out = filepath.Join(filepath.Dir(*inFile), fmt.Sprintf("%s_%s.pdf", base, safeName(batch[0].NPSN+"_"+batch[0].Sekolah)))
 		}
-		if err := tempelWatermark(*inFile, out, batch[0], pages, o); err != nil {
+		id := wm.Identity{NamaSatpen: batch[0].Sekolah, NoRegistrasi: batch[0].Registrasi, NPSN: batch[0].NPSN}
+		if err := wm.ApplyPages(*inFile, out, id, o, pages); err != nil {
 			return err
 		}
 		fmt.Printf("Selesai: %s\n", out)
 		return nil
 	}
 
-	// Mode batch.
 	for i, s := range batch {
 		out := tujuanKeluaran(targetDir, "", base, s)
-		if err := tempelWatermark(*inFile, out, s, pages, o); err != nil {
+		id := wm.Identity{NamaSatpen: s.Sekolah, NoRegistrasi: s.Registrasi, NPSN: s.NPSN}
+		if err := wm.ApplyPages(*inFile, out, id, o, pages); err != nil {
 			return fmt.Errorf("satpen ke-%d (%s): %w", i+1, s.Sekolah, err)
 		}
 		fmt.Printf("[%d/%d] %s\n", i+1, len(batch), filepath.Base(out))
 	}
 	fmt.Printf("Selesai: %d file di %s\n", len(batch), targetDir)
 	return nil
-}
-
-// maxTextWidth menghitung lebar maksimum teks agar tidak melewati tepi halaman.
-// Dipakai lebar halaman terkecil di dokumen, karena satu PDF bisa memuat
-// halaman dengan ukuran berbeda.
-func maxTextWidth(inFile string) float64 {
-	dims, err := api.PageDimsFile(inFile)
-	if err != nil || len(dims) == 0 {
-		return 0 // tanpa data, biarkan tanpa batas
-	}
-	minW := dims[0].Width
-	for _, d := range dims {
-		if d.Width > 0 && d.Width < minW {
-			minW = d.Width
-		}
-	}
-	return 0.90 * minW
-}
-
-// tempelWatermark menulis satu PDF keluaran dengan identitas satpen di setiap halaman.
-//
-// Alur ini memakai context pdfcpu secara langsung, bukan api.AddWatermarksFile,
-// karena kotak pembungkus perlu ditambal menjadi bersudut bulat setelah pdfcpu
-// membuat form watermark. Menulis ulang lewat context menjaga seluruh objek
-// asli dokumen tetap utuh.
-func tempelWatermark(inFile, outFile string, s satpen, pages []string, o wmOpts) error {
-	// Teks multi-baris: nama sekolah, nomor registrasi, lalu NPSN.
-	// "\n" diubah pdfcpu menjadi baris baru.
-	var lines []string
-	if s.Sekolah != "" {
-		lines = append(lines, s.Sekolah)
-	}
-	if s.Registrasi != "" {
-		lines = append(lines, "No. Registrasi: "+s.Registrasi)
-	}
-	if s.NPSN != "" {
-		lines = append(lines, "NPSN: "+s.NPSN)
-	}
-	text := strings.Join(lines, "\\n")
-
-	const fontName = "Helvetica-Bold"
-
-	// Ukuran teks dipakai apa adanya sebagai point (skala absolut), bukan
-	// skala relatif terhadap halaman — supaya teks tetap kecil dan seragam
-	// di halaman berukuran apa pun. Baris terpanjang dikecilkan hanya bila
-	// memang melebihi lebar yang tersedia.
-	fs := int(math.Round(o.FontSize))
-	if fs < 1 {
-		fs = 1
-	}
-	if o.MaxWidth > 0 {
-		longest := ""
-		for _, l := range lines {
-			if len(l) > len(longest) {
-				longest = l
-			}
-		}
-		if w, err := font.TextWidthFloat(longest, fontName, float64(fs)); err == nil && w > o.MaxWidth {
-			fs = int(math.Round(float64(fs) * o.MaxWidth / w))
-			if fs < 4 {
-				fs = 4
-			}
-		}
-	}
-
-	// rot:0 memastikan teks horizontal. Ini wajib ditulis eksplisit: default
-	// pdfcpu adalah diagonal, sehingga tanpa ini teks akan miring.
-	//
-	// bgcolor + border mengaktifkan penggambaran kotak lewat TextDescriptor,
-	// yang menyediakan kotak sesuai ukuran teks secara otomatis. "round" di
-	// situ hanya membulatkan sebesar setengah lebar garis, jadi sudut yang
-	// benar-benar tumpul dipasang belakangan lewat patchSudutBulat.
-	desc := fmt.Sprintf(
-		"pos:%s, rot:%.1f, op:%.3f, points:%d, scalefactor:1 abs, offset:%s, "+
-			"margins:%.1f %.1f, border:%.2f round %s, bgcolor:1 1 1, fontname:%s, color:%s",
-		o.Pos, o.Rotation, o.Opacity, fs, o.Offset,
-		boxPadY, boxPadX, o.BorderWidth, o.Color, fontName, o.Color)
-
-	// onTop=true (stamp) WAJIB untuk dokumen hasil scan. SK seperti ini
-	// umumnya berupa gambar penuh satu halaman; kalau watermark digambar di
-	// belakang gambar tersebut, ia tidak akan terlihat sama sekali dan
-	// proteksinya hilang tanpa disadari.
-	wm, err := pdfcpu.ParseTextWatermarkDetails(text, desc, true, types.POINTS)
-	if err != nil {
-		return fmt.Errorf("menyusun watermark: %w", err)
-	}
-
-	f, err := os.Open(inFile)
-	if err != nil {
-		return fmt.Errorf("membuka %s: %w", inFile, err)
-	}
-	defer f.Close()
-
-	conf := common.NewConf("")
-	conf.Cmd = model.ADDWATERMARKS
-
-	ctx, err := api.ReadValidateAndOptimize(f, conf)
-	if err != nil {
-		return fmt.Errorf("membaca %s: %w", inFile, err)
-	}
-
-	if err := pdfcpu.AddWatermarks(ctx, halamanTerpilih(ctx.PageCount, pages), wm); err != nil {
-		return fmt.Errorf("menempelkan watermark: %w", err)
-	}
-
-	if o.Radius > 0 {
-		if err := patchSudutBulat(ctx, o.Radius); err != nil {
-			return fmt.Errorf("membulatkan sudut kotak: %w", err)
-		}
-	}
-
-	out, err := os.Create(outFile)
-	if err != nil {
-		return fmt.Errorf("membuat %s: %w", outFile, err)
-	}
-	defer out.Close()
-	if err := api.WriteContext(ctx, out); err != nil {
-		return fmt.Errorf("menulis %s: %w", outFile, err)
-	}
-	return nil
-}
-
-// halamanTerpilih mengubah pilihan halaman berbentuk string menjadi IntSet.
-// Daftar kosong berarti semua halaman.
-func halamanTerpilih(pageCount int, pages []string) types.IntSet {
-	if len(pages) == 0 {
-		return nil
-	}
-	// Format yang dipakai pemanggil: satu rentang "awal-akhir".
-	set := types.IntSet{}
-	for _, p := range pages {
-		awal, akhir, ok := strings.Cut(p, "-")
-		if !ok {
-			continue
-		}
-		a, err1 := strconv.Atoi(strings.TrimSpace(awal))
-		b, err2 := strconv.Atoi(strings.TrimSpace(akhir))
-		if err1 != nil || err2 != nil {
-			continue
-		}
-		for i := a; i <= b && i <= pageCount; i++ {
-			set[i] = true
-		}
-	}
-	return set
-}
-
-// Persegi siku pada form watermark: "... 0.50 0.50 155.05 43.56 re B ..."
-var rectDiForm = regexp.MustCompile(`(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+) re B`)
-
-// batasUkuranForm memisahkan form watermark dari gambar hasil scan. Form
-// watermark hanya beberapa ratus byte, sedangkan gambar scan berukuran
-// ratusan kilobyte.
-const batasUkuranForm = 4000
-
-// patchSudutBulat mengganti persegi siku pada kotak watermark dengan path
-// bersudut bulat memakai kurva Bezier.
-//
-// Ini diperlukan karena pdfcpu hanya menyediakan line join "round", yang
-// radius pembulatannya terbatas pada setengah lebar garis — pada border 1 pt
-// hasilnya praktis masih siku.
-func patchSudutBulat(ctx *model.Context, radius float64) error {
-	for _, ent := range ctx.Table {
-		sd, ok := ent.Object.(types.StreamDict)
-		if !ok {
-			continue
-		}
-		if err := sd.Decode(); err != nil {
-			continue
-		}
-		ct := string(sd.Content)
-		// Form watermark memuat operator teks dan berukuran kecil.
-		if !strings.Contains(ct, "Tf") || len(ct) > batasUkuranForm {
-			continue
-		}
-		loc := rectDiForm.FindStringSubmatchIndex(ct)
-		if loc == nil {
-			continue // bukan kotak watermark
-		}
-
-		m := rectDiForm.FindStringSubmatch(ct)
-		x, _ := strconv.ParseFloat(m[1], 64)
-		y, _ := strconv.ParseFloat(m[2], 64)
-		w, _ := strconv.ParseFloat(m[3], 64)
-		h, _ := strconv.ParseFloat(m[4], 64)
-
-		// Radius tidak boleh melebihi setengah sisi terpendek.
-		r := radius
-		if r > w/2 {
-			r = w / 2
-		}
-		if r > h/2 {
-			r = h / 2
-		}
-
-		baru := []byte(ct[:loc[0]] + pathSudutBulat(x, y, w, h, r) + ct[loc[1]:])
-
-		// Raw dan StreamLength harus konsisten: penulis PDF memakai sd.Raw
-		// dan memverifikasi panjangnya terhadap StreamLength. Isi yang sudah
-		// didekode ditulis apa adanya, jadi filter dilepas.
-		sd.Content = baru
-		sd.Raw = baru
-		n := int64(len(baru))
-		sd.StreamLength = &n
-		sd.Dict.Update("Length", types.Integer(n))
-		sd.FilterPipeline = nil
-		delete(sd.Dict, "Filter")
-
-		// StreamDict disimpan by value, jadi hasil modifikasi harus ditulis
-		// kembali ke entri tabel agar ikut tersimpan.
-		ent.Object = sd
-		return nil
-	}
-	return fmt.Errorf("kotak watermark tidak ditemukan")
-}
-
-// pathSudutBulat menyusun path persegi bersudut bulat ber-radius r.
-func pathSudutBulat(x, y, w, h, r float64) string {
-	// Konstanta Bezier untuk aproksimasi seperempat lingkaran.
-	const k = 0.5522847498307933
-	c := k * r
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "%.2f %.2f m ", x+r, y)       // mulai sisi bawah
-	fmt.Fprintf(&b, "%.2f %.2f l ", x+w-r, y)     // sisi bawah
-	fmt.Fprintf(&b, "%.2f %.2f %.2f %.2f %.2f %.2f c ", x+w-r+c, y, x+w, y+r-c, x+w, y+r)
-	fmt.Fprintf(&b, "%.2f %.2f l ", x+w, y+h-r)   // sisi kanan
-	fmt.Fprintf(&b, "%.2f %.2f %.2f %.2f %.2f %.2f c ", x+w, y+h-r+c, x+w-r+c, y+h, x+w-r, y+h)
-	fmt.Fprintf(&b, "%.2f %.2f l ", x+r, y+h)     // sisi atas
-	fmt.Fprintf(&b, "%.2f %.2f %.2f %.2f %.2f %.2f c ", x+r-c, y+h, x, y+h-r+c, x, y+h-r)
-	fmt.Fprintf(&b, "%.2f %.2f l ", x, y+r)       // sisi kiri
-	fmt.Fprintf(&b, "%.2f %.2f %.2f %.2f %.2f %.2f c ", x, y+r-c, x+r-c, y, x+r, y)
-	b.WriteString("B ")
-	return b.String()
 }
 
 func tujuanKeluaran(outDir, explicit, base string, s satpen) string {
@@ -536,10 +272,9 @@ func safeName(s string) string {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
 			b.WriteRune(r)
 		default:
-			b.WriteRune('_') // spasi dan tanda baca menjadi pemisah
+			b.WriteRune('_')
 		}
 	}
-	// Rapikan pemisah beruntun: "a / b" -> "a_b", bukan "a___b".
 	return strings.Join(strings.FieldsFunc(b.String(), func(r rune) bool { return r == '_' }), "_")
 }
 
@@ -561,8 +296,6 @@ func validateSatpen(s satpen) error {
 	return nil
 }
 
-// readSatpenCSV membaca CSV dengan kolom sekolah, registrasi, npsn.
-// Urutan dan penamaan kolom dideteksi dari baris header bila ada.
 func readSatpenCSV(path string) ([]satpen, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -578,8 +311,6 @@ func readSatpenCSV(path string) ([]satpen, error) {
 		return nil, fmt.Errorf("CSV kosong")
 	}
 
-	// Tanpa header, urutan kolom mengikuti format yang didokumentasikan:
-	// sekolah, registrasi, npsn.
 	idxSekolah, idxReg, idxNPSN := 0, 1, 2
 	start := 0
 
@@ -614,15 +345,13 @@ func readSatpenCSV(path string) ([]satpen, error) {
 		}
 		s := satpen{Sekolah: get(idxSekolah), Registrasi: get(idxReg), NPSN: get(idxNPSN)}
 		if s.Sekolah == "" && s.NPSN == "" && s.Registrasi == "" {
-			continue // lewati baris kosong
+			continue
 		}
 		out = append(out, s)
 	}
 	return out, nil
 }
 
-// contohSatpen dipakai bila tidak ada data satpen yang diberikan, supaya alur
-// kerja bisa langsung dilihat tanpa harus mengisi opsi.
 func contohSatpen() []satpen {
 	return []satpen{
 		{Sekolah: "SMA Negeri 1 Kediri", Registrasi: "BHPNU/2026/001234", NPSN: "20512345"},

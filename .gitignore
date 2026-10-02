@@ -14,3 +14,12 @@ bin/
 # Go
 *.test
 *.out
+
+# Service configuration
+config.yaml
+
+# Local testing
+test_docs/
+request.json
+run_test.bat
+
