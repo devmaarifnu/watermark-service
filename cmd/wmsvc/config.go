@@ -10,6 +10,40 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+type StringOrSlice []string
+
+func (s *StringOrSlice) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		var str string
+		if err := value.Decode(&str); err != nil {
+			return err
+		}
+		str = strings.TrimSpace(str)
+		if str != "" {
+			*s = []string{str}
+		} else {
+			*s = []string{}
+		}
+		return nil
+	}
+	if value.Kind == yaml.SequenceNode {
+		var slice []string
+		if err := value.Decode(&slice); err != nil {
+			return err
+		}
+		var cleaned []string
+		for _, item := range slice {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				cleaned = append(cleaned, item)
+			}
+		}
+		*s = cleaned
+		return nil
+	}
+	return fmt.Errorf("harus berupa string atau array string")
+}
+
 type ServerConfig struct {
 	Addr            string        `yaml:"addr"`
 	ReadTimeout     time.Duration `yaml:"read_timeout"`
@@ -18,7 +52,8 @@ type ServerConfig struct {
 }
 
 type WebhookConfig struct {
-	URL         string        `yaml:"url"`
+	URL         StringOrSlice `yaml:"url"`
+	URLs        StringOrSlice `yaml:"urls,omitempty"`
 	Secret      string        `yaml:"secret"`
 	Timeout     time.Duration `yaml:"timeout"`
 	MaxAttempts int           `yaml:"max_attempts"`
@@ -30,11 +65,12 @@ type AuthConfig struct {
 }
 
 type StorageConfig struct {
-	AllowedInputBase  []string `yaml:"allowed_input_base"`
-	AllowedOutputBase string   `yaml:"allowed_output_base"`
-	TmpDir            string   `yaml:"tmp_dir"`
-	CreateOutputDir   bool     `yaml:"create_output_dir"`
-	Overwrite         bool     `yaml:"overwrite"`
+	AllowedInputBase   StringOrSlice `yaml:"allowed_input_base"`
+	AllowedOutputBase  StringOrSlice `yaml:"allowed_output_base"`
+	AllowedOutputBases StringOrSlice `yaml:"allowed_output_bases,omitempty"`
+	TmpDir             string        `yaml:"tmp_dir"`
+	CreateOutputDir    bool          `yaml:"create_output_dir"`
+	Overwrite          bool          `yaml:"overwrite"`
 }
 
 type SecurityConfig struct {
@@ -158,7 +194,32 @@ func LoadConfig(configPath string) (*Config, error) {
 
 	// Environment variable overrides
 	if envURL := os.Getenv("WEBHOOK_URL"); envURL != "" {
-		cfg.Webhook.URL = envURL
+		parts := strings.FieldsFunc(envURL, func(r rune) bool {
+			return r == ',' || r == ';'
+		})
+		var urls []string
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				urls = append(urls, s)
+			}
+		}
+		if len(urls) > 0 {
+			cfg.Webhook.URL = urls
+		}
+	}
+	if envURLs := os.Getenv("WEBHOOK_URLS"); envURLs != "" {
+		parts := strings.FieldsFunc(envURLs, func(r rune) bool {
+			return r == ',' || r == ';'
+		})
+		var urls []string
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				urls = append(urls, s)
+			}
+		}
+		if len(urls) > 0 {
+			cfg.Webhook.URL = urls
+		}
 	}
 	if envSecret := os.Getenv("WEBHOOK_SECRET"); envSecret != "" {
 		cfg.Webhook.Secret = envSecret
@@ -169,6 +230,34 @@ func LoadConfig(configPath string) (*Config, error) {
 	if envLogLevel := os.Getenv("LOG_LEVEL"); envLogLevel != "" {
 		cfg.Log.Level = envLogLevel
 	}
+	if envOut := os.Getenv("ALLOWED_OUTPUT_BASE"); envOut != "" {
+		parts := strings.FieldsFunc(envOut, func(r rune) bool {
+			return r == ',' || r == ';'
+		})
+		var bases []string
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				bases = append(bases, s)
+			}
+		}
+		if len(bases) > 0 {
+			cfg.Storage.AllowedOutputBase = bases
+		}
+	}
+	if envOutBases := os.Getenv("ALLOWED_OUTPUT_BASES"); envOutBases != "" {
+		parts := strings.FieldsFunc(envOutBases, func(r rune) bool {
+			return r == ',' || r == ';'
+		})
+		var bases []string
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				bases = append(bases, s)
+			}
+		}
+		if len(bases) > 0 {
+			cfg.Storage.AllowedOutputBase = bases
+		}
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validasi konfigurasi gagal: %w", err)
@@ -177,34 +266,55 @@ func LoadConfig(configPath string) (*Config, error) {
 	return &cfg, nil
 }
 
+func (c *Config) normalize() {
+	if len(c.Webhook.URLs) > 0 {
+		c.Webhook.URL = append(c.Webhook.URL, c.Webhook.URLs...)
+		c.Webhook.URLs = nil
+	}
+	if len(c.Storage.AllowedOutputBases) > 0 {
+		c.Storage.AllowedOutputBase = append(c.Storage.AllowedOutputBase, c.Storage.AllowedOutputBases...)
+		c.Storage.AllowedOutputBases = nil
+	}
+}
+
 // Validate memeriksa kelayakan konfigurasi saat service dinyalakan (§8.4).
 func (c *Config) Validate() error {
-	if strings.TrimSpace(c.Webhook.URL) == "" {
+	c.normalize()
+
+	if len(c.Webhook.URL) == 0 {
 		return fmt.Errorf("webhook.url kosong")
 	}
+	for _, u := range c.Webhook.URL {
+		if strings.TrimSpace(u) == "" {
+			return fmt.Errorf("webhook.url memuat URL kosong")
+		}
+	}
 
-	if strings.TrimSpace(c.Storage.AllowedOutputBase) == "" {
+	if len(c.Storage.AllowedOutputBase) == 0 {
 		return fmt.Errorf("storage.allowed_output_base kosong")
 	}
 
-	if !c.Security.AllowAnyPath && len(c.Storage.AllowedInputBase) == 0 {
-		return fmt.Errorf("storage.allowed_input_base kosong (kecuali security.allow_any_path: true)")
-	}
-
 	// Cek / buat direktori allowed_output_base
-	outBase := filepath.Clean(c.Storage.AllowedOutputBase)
-	if _, err := os.Stat(outBase); err != nil {
-		if os.IsNotExist(err) {
-			if err := os.MkdirAll(outBase, 0o755); err != nil {
-				return fmt.Errorf("storage.allowed_output_base tidak ada dan gagal dibuat: %w", err)
+	for _, outBase := range c.Storage.AllowedOutputBase {
+		cleanOut := filepath.Clean(outBase)
+		if _, err := os.Stat(cleanOut); err != nil {
+			if os.IsNotExist(err) {
+				if err := os.MkdirAll(cleanOut, 0o755); err != nil {
+					if !c.Security.AllowAnyPath {
+						return fmt.Errorf("storage.allowed_output_base (%s) tidak ada dan gagal dibuat: %w", outBase, err)
+					}
+				}
+			} else if !c.Security.AllowAnyPath {
+				return fmt.Errorf("storage.allowed_output_base (%s) bermasalah: %w", outBase, err)
 			}
-		} else {
-			return fmt.Errorf("storage.allowed_output_base bermasalah: %w", err)
 		}
 	}
 
 	// Cek / buat direktori allowed_input_base bila allow_any_path false
 	if !c.Security.AllowAnyPath {
+		if len(c.Storage.AllowedInputBase) == 0 {
+			return fmt.Errorf("storage.allowed_input_base kosong (kecuali security.allow_any_path: true)")
+		}
 		for _, inBase := range c.Storage.AllowedInputBase {
 			cleanIn := filepath.Clean(inBase)
 			if _, err := os.Stat(cleanIn); err != nil {

@@ -55,6 +55,66 @@ log:
 	if cfg.Log.Level != "debug" {
 		t.Errorf("Log.Level = %s, want debug", cfg.Log.Level)
 	}
+	if len(cfg.Webhook.URL) != 1 || cfg.Webhook.URL[0] != "https://example.com/webhook" {
+		t.Errorf("Webhook.URL = %v, want ['https://example.com/webhook']", cfg.Webhook.URL)
+	}
+	if len(cfg.Storage.AllowedOutputBase) != 1 || filepath.Clean(cfg.Storage.AllowedOutputBase[0]) != filepath.Clean(outDir) {
+		t.Errorf("Storage.AllowedOutputBase = %v, want [%s]", cfg.Storage.AllowedOutputBase, outDir)
+	}
+}
+
+func TestLoadConfigMultipleURLsAndBases(t *testing.T) {
+	dir := t.TempDir()
+	outDir1 := filepath.Join(dir, "out1")
+	outDir2 := filepath.Join(dir, "out2")
+	_ = os.MkdirAll(outDir1, 0o755)
+	_ = os.MkdirAll(outDir2, 0o755)
+	cfgPath := filepath.Join(dir, "config_multi.yaml")
+
+	content := `
+webhook:
+  url:
+    - "https://sipinter-dev.maarifnu.or.id/api/webhook/wm/akta"
+    - "https://internal.example.id/api/bhpnu/callback"
+  secret: "c3c462d2-bc66-11f1-a1a4-525400092aa6"
+storage:
+  allowed_output_base:
+    - "` + filepath.ToSlash(outDir1) + `"
+    - "` + filepath.ToSlash(outDir2) + `"
+security:
+  allow_any_path: true
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	if len(cfg.Webhook.URL) != 2 {
+		t.Fatalf("expected 2 webhook URLs, got %d", len(cfg.Webhook.URL))
+	}
+	if cfg.Webhook.URL[0] != "https://sipinter-dev.maarifnu.or.id/api/webhook/wm/akta" {
+		t.Errorf("Webhook URL[0] = %q", cfg.Webhook.URL[0])
+	}
+	if cfg.Webhook.URL[1] != "https://internal.example.id/api/bhpnu/callback" {
+		t.Errorf("Webhook URL[1] = %q", cfg.Webhook.URL[1])
+	}
+
+	if len(cfg.Storage.AllowedOutputBase) != 2 {
+		t.Fatalf("expected 2 allowed output bases, got %d", len(cfg.Storage.AllowedOutputBase))
+	}
+	if filepath.Clean(cfg.Storage.AllowedOutputBase[0]) != filepath.Clean(outDir1) {
+		t.Errorf("AllowedOutputBase[0] = %q, want %q", cfg.Storage.AllowedOutputBase[0], outDir1)
+	}
+	if filepath.Clean(cfg.Storage.AllowedOutputBase[1]) != filepath.Clean(outDir2) {
+		t.Errorf("AllowedOutputBase[1] = %q, want %q", cfg.Storage.AllowedOutputBase[1], outDir2)
+	}
+	if cfg.Webhook.Secret != "c3c462d2-bc66-11f1-a1a4-525400092aa6" {
+		t.Errorf("Webhook.Secret = %q", cfg.Webhook.Secret)
+	}
 }
 
 func TestConfigValidationFailures(t *testing.T) {

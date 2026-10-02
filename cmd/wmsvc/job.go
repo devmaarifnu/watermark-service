@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -162,14 +163,23 @@ func (wp *WorkerPool) processJob(workerID int, job Job) {
 	}
 
 	// Tahap 4: Simpan ke output_path
-	if err := os.MkdirAll(job.OutputPath, 0o755); err != nil {
-		wp.notifyFailure(ctx, job, "store", fmt.Sprintf("gagal membuat output_path: %v", err), start)
-		return
+	var finalPath string
+	if strings.ToLower(filepath.Ext(job.OutputPath)) == ".pdf" {
+		finalPath = job.OutputPath
+		targetDir := filepath.Dir(finalPath)
+		if err := os.MkdirAll(targetDir, 0o755); err != nil {
+			wp.notifyFailure(ctx, job, "store", fmt.Sprintf("gagal membuat direktori tujuan (%s): %v", targetDir, err), start)
+			return
+		}
+	} else {
+		if err := os.MkdirAll(job.OutputPath, 0o755); err != nil {
+			wp.notifyFailure(ctx, job, "store", fmt.Sprintf("gagal membuat output_path (%s): %v", job.OutputPath, err), start)
+			return
+		}
+		timestamp := time.Now().UTC().Format("20060102T150405Z")
+		filename := fmt.Sprintf("%d_%s_akta.pdf", job.BHPNUID, timestamp)
+		finalPath = filepath.Join(job.OutputPath, filename)
 	}
-
-	timestamp := time.Now().UTC().Format("20060102T150405Z")
-	filename := fmt.Sprintf("%d_%s_akta.pdf", job.BHPNUID, timestamp)
-	finalPath := filepath.Join(job.OutputPath, filename)
 
 	if err := moveOrCopy(mergedTempPath, finalPath); err != nil {
 		wp.notifyFailure(ctx, job, "store", fmt.Sprintf("gagal menyimpan file ke %s: %v", finalPath, err), start)

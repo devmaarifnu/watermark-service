@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,16 +14,18 @@ func TestSendWebhookSuccessAndSignature(t *testing.T) {
 	secret := "my-secret-key"
 	received := false
 	var receivedSig string
+	var receivedAuth string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received = true
 		receivedSig = r.Header.Get("X-Signature")
+		receivedAuth = r.Header.Get("Authorization")
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
 	cfg := &WebhookConfig{
-		URL:         srv.URL,
+		URL:         StringOrSlice{srv.URL},
 		Secret:      secret,
 		Timeout:     2 * time.Second,
 		MaxAttempts: 3,
@@ -47,9 +50,62 @@ func TestSendWebhookSuccessAndSignature(t *testing.T) {
 		t.Errorf("webhook was not received")
 	}
 
+	expectedAuth := "Bearer my-secret-key"
+	if receivedAuth != expectedAuth {
+		t.Errorf("expected Authorization header %q, got %q", expectedAuth, receivedAuth)
+	}
+
 	expectedPrefix := "sha256="
 	if len(receivedSig) <= len(expectedPrefix) || receivedSig[:len(expectedPrefix)] != expectedPrefix {
 		t.Errorf("expected X-Signature with prefix sha256=, got %q", receivedSig)
+	}
+}
+
+func TestSendWebhookMultipleURLs(t *testing.T) {
+	var count atomic.Int32
+	var authHeaders []string
+	var mu sync.Mutex
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count.Add(1)
+		mu.Lock()
+		authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+
+	srv1 := httptest.NewServer(handler)
+	defer srv1.Close()
+	srv2 := httptest.NewServer(handler)
+	defer srv2.Close()
+
+	secret := "secret-xyz"
+	cfg := &WebhookConfig{
+		URL:         StringOrSlice{srv1.URL, srv2.URL},
+		Secret:      secret,
+		Timeout:     2 * time.Second,
+		MaxAttempts: 2,
+		BackoffBase: 10 * time.Millisecond,
+	}
+
+	payload := WebhookPayload{
+		BHPNUID:   99,
+		RequestID: "req-multi",
+		Status:    "success",
+	}
+
+	err := SendWebhook(context.Background(), cfg, payload)
+	if err != nil {
+		t.Fatalf("SendWebhook multiple failed: %v", err)
+	}
+
+	if count.Load() != 2 {
+		t.Errorf("expected 2 webhook hits, got %d", count.Load())
+	}
+	for _, auth := range authHeaders {
+		if auth != "Bearer secret-xyz" {
+			t.Errorf("expected Authorization header Bearer secret-xyz, got %q", auth)
+		}
 	}
 }
 
@@ -67,7 +123,7 @@ func TestSendWebhookRetryOn5xx(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &WebhookConfig{
-		URL:         srv.URL,
+		URL:         StringOrSlice{srv.URL},
 		Timeout:     2 * time.Second,
 		MaxAttempts: 4,
 		BackoffBase: 10 * time.Millisecond,
@@ -99,7 +155,7 @@ func TestSendWebhookNoRetryOn4xx(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &WebhookConfig{
-		URL:         srv.URL,
+		URL:         StringOrSlice{srv.URL},
 		Timeout:     2 * time.Second,
 		MaxAttempts: 4,
 		BackoffBase: 10 * time.Millisecond,

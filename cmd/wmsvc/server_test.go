@@ -70,7 +70,7 @@ func setupTestEnvironment(t *testing.T, webhookHandler http.HandlerFunc) (*Confi
 			ShutdownTimeout: 5 * time.Second,
 		},
 		Webhook: WebhookConfig{
-			URL:         webhookURL,
+			URL:         StringOrSlice{webhookURL},
 			Secret:      "test-secret",
 			Timeout:     2 * time.Second,
 			MaxAttempts: 2,
@@ -80,8 +80,8 @@ func setupTestEnvironment(t *testing.T, webhookHandler http.HandlerFunc) (*Confi
 			APIKey: "secret-key",
 		},
 		Storage: StorageConfig{
-			AllowedInputBase:  []string{inDir},
-			AllowedOutputBase: outDir,
+			AllowedInputBase:  StringOrSlice{inDir},
+			AllowedOutputBase: StringOrSlice{outDir},
 			TmpDir:            tmpDir,
 			CreateOutputDir:   true,
 			Overwrite:         false,
@@ -130,11 +130,13 @@ func setupTestEnvironment(t *testing.T, webhookHandler http.HandlerFunc) (*Confi
 func TestAktaSuccessEndToEnd(t *testing.T) {
 	var webhookPayload WebhookPayload
 	var webhookSignature string
+	var webhookAuth string
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	webhookHandler := func(w http.ResponseWriter, r *http.Request) {
 		webhookSignature = r.Header.Get("X-Signature")
+		webhookAuth = r.Header.Get("Authorization")
 		_ = json.NewDecoder(r.Body).Decode(&webhookPayload)
 		w.WriteHeader(http.StatusOK)
 		wg.Done()
@@ -212,6 +214,9 @@ func TestAktaSuccessEndToEnd(t *testing.T) {
 	if webhookPayload.BHPNUID != 101 {
 		t.Errorf("expected bhpnu_id 101, got %d", webhookPayload.BHPNUID)
 	}
+	if webhookAuth != "Bearer test-secret" {
+		t.Errorf("expected Authorization header Bearer test-secret, got %q", webhookAuth)
+	}
 	if !strings.HasPrefix(webhookSignature, "sha256=") {
 		t.Errorf("expected X-Signature header sha256=..., got %q", webhookSignature)
 	}
@@ -233,6 +238,91 @@ func TestAktaSuccessEndToEnd(t *testing.T) {
 	}
 	if pages != 3 {
 		t.Errorf("expected 3 pages in merged file, got %d", pages)
+	}
+}
+
+// TestAktaOutputPathAsPdfFile menguji output_path berupa file PDF langsung (bukan folder)
+func TestAktaOutputPathAsPdfFile(t *testing.T) {
+	var webhookPayload WebhookPayload
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	webhookHandler := func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&webhookPayload)
+		w.WriteHeader(http.StatusOK)
+		wg.Done()
+	}
+
+	_, pool, srv, webhookServer, inDir, outDir := setupTestEnvironment(t, webhookHandler)
+	defer pool.Stop()
+	if webhookServer != nil {
+		defer webhookServer.Close()
+	}
+
+	aktaPath := filepath.Join(inDir, "akta.pdf")
+	piagamPath := filepath.Join(inDir, "piagam.pdf")
+	skPath := filepath.Join(inDir, "sk.pdf")
+
+	createTestPDF(t, aktaPath)
+	createTestPDF(t, piagamPath)
+	createTestPDF(t, skPath)
+
+	targetFilename := "akta-1207240-SMKS-NU-WILANGAN.pdf"
+	targetFilePath := filepath.Join(outDir, targetFilename)
+
+	reqBody := AktaRequest{
+		BHPNUID:    139,
+		AktaPath:   aktaPath,
+		PiagamPath: piagamPath,
+		SKPath:     skPath,
+		OutputPath: targetFilePath,
+		Data: IdentityData{
+			NamaSatpen:   "SMKS NU WILANGAN",
+			NoRegistrasi: "1207240",
+			NPSN:         "20577488",
+		},
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/wm/akta", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "secret-key")
+
+	w := httptest.NewRecorder()
+	srv.handleAkta(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted, got %d: %s", w.Code, w.Body.String())
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout menunggu webhook")
+	}
+
+	if webhookPayload.Status != "success" {
+		t.Fatalf("expected webhook status success, got %s (error: %s)", webhookPayload.Status, webhookPayload.Error)
+	}
+
+	// Pastikan file target ada dan BUKAN direktori
+	info, err := os.Stat(targetFilePath)
+	if err != nil {
+		t.Fatalf("file target %s tidak ditemukan: %v", targetFilePath, err)
+	}
+	if info.IsDir() {
+		t.Fatalf("target %s adalah direktori, seharusnya berupa file PDF!", targetFilePath)
+	}
+
+	// Validasi PDF
+	if err := api.ValidateFile(targetFilePath, common.NewConf("")); err != nil {
+		t.Fatalf("validasi output pdf gagal: %v", err)
 	}
 }
 

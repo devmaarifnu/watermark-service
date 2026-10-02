@@ -11,6 +11,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,9 +36,10 @@ func computeHMAC256(secret string, body []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
-// SendWebhook mengirim notifikasi webhook dengan timeout dan retry exponential backoff.
+// SendWebhook mengirim notifikasi webhook ke seluruh URL yang terdaftar dengan timeout dan retry exponential backoff.
 func SendWebhook(ctx context.Context, cfg *WebhookConfig, payload WebhookPayload) error {
-	if cfg.URL == "" {
+	urls := cfg.URL
+	if len(urls) == 0 {
 		return fmt.Errorf("webhook url kosong")
 	}
 
@@ -63,13 +66,51 @@ func SendWebhook(ctx context.Context, cfg *WebhookConfig, payload WebhookPayload
 		backoff = 1 * time.Second
 	}
 
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		errs []string
+	)
+
+	for _, targetURL := range urls {
+		targetURL := strings.TrimSpace(targetURL)
+		if targetURL == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			if err := sendToSingleURL(ctx, client, url, cfg.Secret, sigHeader, bodyBytes, maxAttempts, backoff); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("[%s]: %v", url, err))
+				mu.Unlock()
+			}
+		}(targetURL)
+	}
+
+	wg.Wait()
+
+	if len(errs) > 0 {
+		return fmt.Errorf("pengiriman webhook gagal untuk %d url: %s", len(errs), strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func sendToSingleURL(ctx context.Context, client *http.Client, targetURL, secret, sigHeader string, bodyBytes []byte, maxAttempts int, backoff time.Duration) error {
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.URL, bytes.NewReader(bodyBytes))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(bodyBytes))
 		if err != nil {
 			return fmt.Errorf("gagal membuat request webhook: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if secret != "" {
+			if strings.HasPrefix(secret, "Bearer ") {
+				req.Header.Set("Authorization", secret)
+			} else {
+				req.Header.Set("Authorization", "Bearer "+secret)
+			}
+		}
 		if sigHeader != "" {
 			req.Header.Set("X-Signature", sigHeader)
 		}
@@ -97,7 +138,7 @@ func SendWebhook(ctx context.Context, cfg *WebhookConfig, payload WebhookPayload
 
 		if attempt < maxAttempts {
 			waitTime := backoff * time.Duration(1<<(attempt-1))
-			log.Printf("[webhook] Percobaan %d gagal: %v. Mencoba lagi dalam %v...", attempt, lastErr, waitTime)
+			log.Printf("[webhook] URL %s: Percobaan %d gagal: %v. Mencoba lagi dalam %v...", targetURL, attempt, lastErr, waitTime)
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("webhook context dibatalkan: %w (last error: %v)", ctx.Err(), lastErr)

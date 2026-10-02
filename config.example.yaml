@@ -5,8 +5,13 @@ server:
   shutdown_timeout: 30s
 
 webhook:
-  url: "https://internal.example.id/api/bhpnu/callback"
-  secret: "" # diisi lewat ENV di produksi
+  # Mendukung string tunggal maupun list (multiple URL)
+  url: "https://sipinter-dev.maarifnu.or.id/api/webhook/wm/akta"
+  # Contoh multiple URL:
+  # url:
+  #   - "https://sipinter-dev.maarifnu.or.id/api/webhook/wm/akta"
+  #   - "https://internal.example.id/api/bhpnu/callback"
+  secret: "c3c462d2-bc66-11f1-a1a4-525400092aa6" # Dikirim sebagai Authorization: Bearer <secret>
   timeout: 10s
   max_attempts: 5
   backoff_base: 1s
@@ -16,8 +21,14 @@ auth:
 
 storage:
   allowed_input_base:
-    - "/var/www/src"
-  allowed_output_base: "/var/www/out"
+    - "/var/www/sipinter-dev/storage/app/templates"
+    - "/var/www/sipinter-dev/storage/app/generated"
+  # Mendukung string tunggal maupun list (multiple path)
+  allowed_output_base: "/var/www/sipinter-dev/storage/app/bhpnu-doc/akta"
+  # Contoh multiple path:
+  # allowed_output_base:
+  #   - "/var/www/sipinter-dev/storage/app/bhpnu-doc/akta"
+  #   - "/var/www/sipinter-dev/storage/app/another-doc"
   tmp_dir: "/var/tmp/wmsvc"
   create_output_dir: true
   overwrite: false

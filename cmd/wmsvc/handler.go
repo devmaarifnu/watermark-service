@@ -157,6 +157,13 @@ func (s *Server) handleAkta(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if ext := filepath.Ext(req.OutputPath); ext != "" && strings.ToLower(ext) != ".pdf" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
+			Error:     "output_path bila menyertakan ekstensi berkas harus berekstensi .pdf",
+			RequestID: reqID,
+		})
+		return
+	}
 
 	// 6. Validasi Path Traversal & Base Directory (§9 - 403)
 	if !s.cfg.Security.AllowAnyPath {
@@ -181,7 +188,7 @@ func (s *Server) handleAkta(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if !isPathInsideBase(s.cfg.Storage.AllowedOutputBase, req.OutputPath) {
+		if !s.isOutputAllowed(req.OutputPath) {
 			writeJSON(w, http.StatusForbidden, ErrorResponse{
 				Error:     fmt.Sprintf("output_path %q di luar direktori yang diizinkan", req.OutputPath),
 				RequestID: reqID,
@@ -248,6 +255,15 @@ func (s *Server) isInputAllowed(targetPath string) bool {
 	return false
 }
 
+func (s *Server) isOutputAllowed(targetPath string) bool {
+	for _, base := range s.cfg.Storage.AllowedOutputBase {
+		if isPathInsideBase(base, targetPath) {
+			return true
+		}
+	}
+	return false
+}
+
 func isPathInsideBase(baseDir, targetPath string) bool {
 	cleanBase := filepath.Clean(baseDir)
 	cleanTarget := filepath.Clean(targetPath)
@@ -255,13 +271,23 @@ func isPathInsideBase(baseDir, targetPath string) bool {
 	if realBase, err := filepath.EvalSymlinks(cleanBase); err == nil {
 		cleanBase = realBase
 	}
-	if realTarget, err := filepath.EvalSymlinks(cleanTarget); err == nil {
-		cleanTarget = realTarget
-	} else {
-		parentDir := filepath.Dir(cleanTarget)
-		if realParent, err := filepath.EvalSymlinks(parentDir); err == nil {
-			cleanTarget = filepath.Join(realParent, filepath.Base(cleanTarget))
+
+	curr := cleanTarget
+	var unexistingParts []string
+	for {
+		if realCurr, err := filepath.EvalSymlinks(curr); err == nil {
+			for i := len(unexistingParts) - 1; i >= 0; i-- {
+				realCurr = filepath.Join(realCurr, unexistingParts[i])
+			}
+			cleanTarget = realCurr
+			break
 		}
+		parent := filepath.Dir(curr)
+		if parent == curr {
+			break
+		}
+		unexistingParts = append(unexistingParts, filepath.Base(curr))
+		curr = parent
 	}
 
 	rel, err := filepath.Rel(cleanBase, cleanTarget)
